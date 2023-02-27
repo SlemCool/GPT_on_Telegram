@@ -35,6 +35,7 @@ stop_symbols = '###'
 translator = Translator()
 
 users = {}
+insert_db = {'rq': 'empty', 'eng_rq': '', 'ans': 'empty', 'rus_ans': ''}
 
 
 def check_tokens():
@@ -46,6 +47,7 @@ if not check_tokens():
     logger.critical('Отсутствует хотя бы одна переменная окружения')
     raise ValueError('Отсутствует хотя бы одна переменная окружения!')
 logger.debug('Переменные прошли проверку')
+
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 openai.api_key = OPENAI_TOKEN
 
@@ -57,7 +59,7 @@ def db_table_val(user_id: int, user_name: str, user_first_name: str,
         sqlite_connection = sqlite3.connect('Telegram_GPT_rq',
                                             check_same_thread=False)
         cursor_db = sqlite_connection.cursor()
-        logger.debug('Соединение с SQLite для бд "db/db_tele_GPT" открыто')
+        logger.debug('Соединение с SQLite для бд "Telegram_GPT_rq" открыто')
 
         cursor_db.execute(
             'INSERT INTO UsersRq (user_id, user_name, user_first_name, '
@@ -89,7 +91,6 @@ def _get_user(id):
 
 
 def _process_rq(user, rq):
-    insert_db = {'rq': rq, 'eng_rq': '', 'ans': '', 'rus_ans': ''}
     try:
         user_context = _get_user(user.id)
         last_text = user_context['last_text']
@@ -102,6 +103,7 @@ def _process_rq(user, rq):
                 f'По прошествию 10 мин контекст общения для {user.id} очищен')
 
         if rq and 0 < len(rq) < 1000:
+            insert_db['rq'] = rq
             inc_detect = translator.detect(rq)
             if inc_detect.lang == 'ru':
                 logger.debug('Перевод запроса с русского языка')
@@ -122,6 +124,7 @@ def _process_rq(user, rq):
             if '->' in eng_ans:
                 eng_ans = eng_ans.split('->')[0].strip()
             ans = eng_ans
+            insert_db['ans'] = ans
             if inc_detect.lang == 'ru':
                 logger.debug('Перевод ответа с английского языка')
                 rus_ans = translator.translate(eng_ans, dest='ru',
@@ -130,7 +133,6 @@ def _process_rq(user, rq):
                 ans = rus_ans
             user_context['last_text'] = prompt + ' ' + eng_ans + stop_symbols
             user_context['last_prompt_time'] = time.time()
-            insert_db['ans'] = ans
             db_table_val(user_id=user.id, user_name=user.username,
                          user_first_name=user.first_name,
                          user_last_name=user.last_name,
@@ -155,7 +157,8 @@ def send_welcome(message):
     bot.reply_to(
         message,
         f'СкайНет просыпается! ✌\n\n-Используется модель: {model}'
-        '\n-Чтобы очистить контекст общения напишите /clear',
+        '\n-Чтобы очистить контекст общения напишите /clear'
+        '\n-Чтобы увидеть последний ответ бота на английском /eng',
     )
     info_message = (
         f'Кто-то нажал /start:\n\n'
@@ -176,6 +179,12 @@ def clear_history(message):
     user['last_text'] = ''
     bot.reply_to(message, 'История общения очищена!')
     logger.debug(f'Контекст общения для пользователя "{user["id"]}" очищен')
+
+@bot.message_handler(commands=['eng'])
+def eng_answer(message):
+    user = _get_user(message.from_user.id)
+    bot.reply_to(message, insert_db['ans'])
+    logger.debug(f'Пользователя "{user["id"]}" запросил ответ на "Eng" языке')
 
 
 @bot.message_handler(func=lambda message: True)
