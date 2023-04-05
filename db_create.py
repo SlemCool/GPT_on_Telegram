@@ -1,7 +1,7 @@
 import sqlite3
 
 try:
-    sqlite_connection = sqlite3.connect('Telegram_GPT_rq')
+    sqlite_connection = sqlite3.connect('telegram_GPT_rq.sqlite')
     sqlite_create_table_query = '''CREATE TABLE "UsersRq"
 (
     id               INTEGER not null

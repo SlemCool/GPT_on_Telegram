@@ -25,12 +25,13 @@ handler.setFormatter(
 )
 logger.addHandler(handler)
 
+# Подтягиваем токены
 OPENAI_TOKEN = os.getenv('OPENAI_TOKEN')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_ADMIN_CHAT_ID = os.getenv('TELEGRAM_ADMIN_CHAT_ID')
 
-model = 'text-davinci-003'
-stop_symbols = '###'
+BASE_MASSAGE = {"role": "system", "content": "You`re a kind helpful assistant"}
+MODEL = 'gpt-3.5-turbo'
 
 translator = Translator()
 
@@ -52,21 +53,37 @@ bot = telebot.TeleBot(TELEGRAM_TOKEN)
 openai.api_key = OPENAI_TOKEN
 
 
-def db_table_val(user_id: int, user_name: str, user_first_name: str,
-                 user_last_name: str, user_rq: str, user_rq_trans: str,
-                 openai_ans: str, openai_ans_trans: str):
+def _db_table_val(
+    user_id: int,
+    user_name: str,
+    user_first_name: str,
+    user_last_name: str,
+    user_rq: str,
+    user_rq_trans: str,
+    openai_ans: str,
+    openai_ans_trans: str,
+):
     try:
-        sqlite_connection = sqlite3.connect('Telegram_GPT_rq',
-                                            check_same_thread=False)
+        sqlite_connection = sqlite3.connect(
+            'telegram_GPT_rq.sqlite', check_same_thread=False
+        )
         cursor_db = sqlite_connection.cursor()
-        logger.debug('Соединение с SQLite для бд "Telegram_GPT_rq" открыто')
+        logger.debug('Соединение с SQLite для бд "telegram_GPT_rq" открыто')
 
         cursor_db.execute(
             'INSERT INTO UsersRq (user_id, user_name, user_first_name, '
             'user_last_name, user_rq, user_rq_trans, '
             'openai_ans, openai_ans_trans) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-            (user_id, user_name, user_first_name, user_last_name, user_rq,
-             user_rq_trans, openai_ans, openai_ans_trans)
+            (
+                user_id,
+                user_name,
+                user_first_name,
+                user_last_name,
+                user_rq,
+                user_rq_trans,
+                openai_ans,
+                openai_ans_trans,
+            ),
         )
         sqlite_connection.commit()
         logger.debug('Запись успешно вставлена в таблицу "UsersRq"')
@@ -81,11 +98,18 @@ def db_table_val(user_id: int, user_name: str, user_first_name: str,
     finally:
         if sqlite_connection:
             sqlite_connection.close()
-            logger.debug(f'Соединение с SQLite закрыто')
+            logger.debug('Соединение с SQLite закрыто')
 
 
 def _get_user(id):
-    user = users.get(id, {'id': id, 'last_text': '', 'last_prompt_time': 0})
+    user = users.get(
+        id,
+        {
+            'id': id,
+            'last_text': [BASE_MASSAGE],
+            'last_prompt_time': time.time(),
+        },
+    )
     users[id] = user
     return user
 
@@ -93,14 +117,16 @@ def _get_user(id):
 def _process_rq(user, rq):
     try:
         user_context = _get_user(user.id)
-        last_text = user_context['last_text']
+        message_history = user_context['last_text']
+        last_message_time = user_context['last_prompt_time']
         # По прошествию 10 мин контекст общения очищается
-        if time.time() - user_context['last_prompt_time'] > 600:
-            last_text = ''
-            user_context['last_prompt_time'] = 0
-            user_context['last_text'] = ''
+        if time.time() - last_message_time > 600:
+            message_history.clear()
+            message_history.append(BASE_MASSAGE)
+            last_message_time = time.time()
             logger.debug(
-                f'По прошествию 10 мин контекст общения для {user.id} очищен')
+                f'По прошествию 10 мин контекст общения для {user.id} очищен'
+            )
 
         if rq and 0 < len(rq) < 1000:
             insert_db['rq'] = rq
@@ -110,41 +136,35 @@ def _process_rq(user, rq):
                 eng_rq = translator.translate(rq, dest='en', src='ru').text
                 rq = eng_rq
                 insert_db['eng_rq'] = eng_rq
-            # Обрезка до 1000 символов
-            prompt = f'{last_text}Q: {rq} ->'[-1000:]
+            message_history.append({"role": "user", "content": rq})
             logger.debug('Отправлен запрос в OpenAI.')
-            completion = openai.Completion.create(
-                engine=model,
-                prompt=prompt,
-                max_tokens=256,
-                stop=[stop_symbols],
+            completion = openai.ChatCompletion.create(
+                model=MODEL,
+                messages=message_history,
+                max_tokens=1000,
                 temperature=0.7,
             )
-            eng_ans = completion['choices'][0]['text'].strip()
-            if '->' in eng_ans:
-                eng_ans = eng_ans.split('->')[0].strip()
-            ans = eng_ans
+            ans = completion.choices[0].message.content
+            message_history.append({"role": "assistant", "content": ans})
             insert_db['ans'] = ans
+            last_message_time = time.time()
             if inc_detect.lang == 'ru':
                 logger.debug('Перевод ответа с английского языка')
-                rus_ans = translator.translate(eng_ans, dest='ru',
-                                               src='en').text
+                rus_ans = translator.translate(ans, dest='ru', src='en').text
                 insert_db['rus_ans'] = rus_ans
                 ans = rus_ans
-            user_context['last_text'] = prompt + ' ' + eng_ans + stop_symbols
-            user_context['last_prompt_time'] = time.time()
-            db_table_val(user_id=user.id, user_name=user.username,
-                         user_first_name=user.first_name,
-                         user_last_name=user.last_name,
-                         user_rq=insert_db['rq'],
-                         user_rq_trans=insert_db['eng_rq'],
-                         openai_ans=insert_db['ans'],
-                         openai_ans_trans=insert_db['rus_ans'])
-
+            _db_table_val(
+                user_id=user.id,
+                user_name=user.username,
+                user_first_name=user.first_name,
+                user_last_name=user.last_name,
+                user_rq=insert_db['rq'],
+                user_rq_trans=insert_db['eng_rq'],
+                openai_ans=insert_db['ans'],
+                openai_ans_trans=insert_db['rus_ans'],
+            )
             return ans
         else:
-            user_context['last_prompt_time'] = 0
-            user_context['last_text'] = ''
             message_error = 'Ошибка! Слишком длинный вопрос'
             logger.error(message_error)
             return message_error
@@ -156,7 +176,7 @@ def _process_rq(user, rq):
 def send_welcome(message):
     bot.reply_to(
         message,
-        f'СкайНет просыпается! ✌\n\n-Используется модель: {model}'
+        f'СкайНет просыпается! ✌\n\n-Используется модель: {MODEL}'
         '\n-Чтобы очистить контекст общения напишите /clear'
         '\n-Чтобы увидеть последний ответ бота на английском /eng',
     )
@@ -175,16 +195,17 @@ def send_welcome(message):
 @bot.message_handler(commands=['clear'])
 def clear_history(message):
     user = _get_user(message.from_user.id)
-    user['last_prompt_time'] = 0
-    user['last_text'] = ''
+    user['last_text'].clear()
+    user['last_text'].append(BASE_MASSAGE)
+    user['last_prompt_time'] = time.time()
     bot.reply_to(message, 'История общения очищена!')
     logger.debug(f'Контекст общения для пользователя "{user["id"]}" очищен')
 
+
 @bot.message_handler(commands=['eng'])
 def eng_answer(message):
-    user = _get_user(message.from_user.id)
     bot.reply_to(message, insert_db['ans'])
-    logger.debug(f'Пользователя "{user["id"]}" запросил ответ на "Eng" языке')
+    logger.debug(f'Юзер "{message.chat.id}" запросил ответ на "Eng" языке')
 
 
 @bot.message_handler(func=lambda message: True)
@@ -195,9 +216,9 @@ def echo_all(message):
         f'Пользователь: {user.id}-{user.username}'
         f'-{user.first_name}-{user.last_name}; '
     )
-    logger.debug('<<< '+user_full_name + ' Послал запрос')
+    logger.debug('<<< ' + user_full_name + ' Послал запрос')
     ans = _process_rq(user, rq)
-    logger.debug('>>> '+user_full_name + ' Дан ответ.')
+    logger.debug('>>> ' + user_full_name + ' Дан ответ.')
     bot.send_message(user.id, ans)
 
 
@@ -206,7 +227,7 @@ if __name__ == '__main__':
     while True:
         try:
             logger.info('Бот приступает к работе')
-            bot.polling()
+            bot.polling(non_stop=True)
         except Exception as error:
             message = f'Сбой в работе программы: {error}'
             logger.error(message)
