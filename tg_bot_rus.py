@@ -223,7 +223,6 @@ def echo_all(message):
 
 
 if __name__ == '__main__':
-
     while True:
         try:
             logger.info('Бот приступает к работе')
